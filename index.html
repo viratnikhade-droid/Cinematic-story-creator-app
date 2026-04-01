@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en" style="height: 100%; overscroll-behavior: contain; user-select: none; -webkit-tap-highlight-color: transparent; --accent-color: #c5a059; --bg-color: #fdfcf8;"><head>
+<script>
+(function() {
+  // Function to set or update viewport meta tag
+  function ensureViewportMeta() {
+    var viewportMeta = document.querySelector('meta[name="viewport"]');
+    
+    if (!viewportMeta) {
+      // Create viewport meta tag if it doesn't exist
+      viewportMeta = document.createElement('meta');
+      viewportMeta.name = 'viewport';
+      document.head.insertBefore(viewportMeta, document.head.firstChild);
+    }
+    
+    // Set viewport to prevent iOS auto-zoom
+    // width=device-width: Use device width
+    // initial-scale=1.0: Initial zoom level
+    // maximum-scale=1.0: Prevent zooming beyond 1.0
+    // user-scalable=no: Disable user scaling (prevents pinch zoom and auto-zoom on input focus)
+    viewportMeta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+  }
+  
+  // Run immediately if DOM is already ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', ensureViewportMeta);
+  } else {
+    ensureViewportMeta();
+  }
+  
+  // Also ensure it's set when head is ready (in case script runs before head)
+  if (!document.head) {
+    var observer = new MutationObserver(function(mutations) {
+      if (document.head) {
+        ensureViewportMeta();
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.documentElement, { childList: true });
+  }
+})();
+</script>
+
+<script>
+(function() {
+  var originalAddEventListener = EventTarget.prototype.addEventListener;
+  var originalRemoveEventListener = EventTarget.prototype.removeEventListener;
+
+  // ── Tap vs Swipe detection ──
+  // Track pointerdown position; only synthesize click when displacement is small.
+  var ptrDownPos = null;
+  var TAP_THRESHOLD_SQ = 100; // 10px squared
+
+  originalAddEventListener.call(document, 'pointerdown', function(e) {
+    if (e.button !== 0) return;
+    ptrDownPos = { x: e.clientX, y: e.clientY };
+  }, { capture: true, passive: true });
+
+  function isTap(e) {
+    if (!ptrDownPos) return true; // no pointerdown recorded — be safe, treat as tap
+    var dx = e.clientX - ptrDownPos.x;
+    var dy = e.clientY - ptrDownPos.y;
+    return (dx * dx + dy * dy) <= TAP_THRESHOLD_SQ;
+  }
+
+  // ── click → pointerup conversion ──
+  var listenerMap = new WeakMap();
+
+  EventTarget.prototype.addEventListener = function(type, listener, options) {
+    if (type === 'click' && typeof listener === 'function') {
+      var elementMap = listenerMap.get(this);
+      if (!elementMap) {
+        elementMap = new Map();
+        listenerMap.set(this, elementMap);
+      }
+
+      var existingPointerListener = elementMap.get(listener);
+      if (existingPointerListener) {
+        return originalAddEventListener.call(this, 'pointerup', existingPointerListener, options);
+      }
+
+      var pointerupListener = function(e) {
+        if (e.button !== 0) return;
+        if (!isTap(e)) return;
+
+        var clickEvent = new MouseEvent('click', {
+          bubbles: e.bubbles, cancelable: e.cancelable, view: e.view,
+          detail: 1,
+          screenX: e.screenX, screenY: e.screenY,
+          clientX: e.clientX, clientY: e.clientY,
+          ctrlKey: e.ctrlKey, altKey: e.altKey,
+          shiftKey: e.shiftKey, metaKey: e.metaKey,
+          button: e.button, relatedTarget: e.relatedTarget
+        });
+        Object.defineProperty(clickEvent, 'target', { value: e.target, enumerable: true });
+        Object.defineProperty(clickEvent, 'currentTarget', { value: e.currentTarget, enumerable: true });
+
+        try { listener.call(this, clickEvent); } catch (err) {}
+      };
+
+      elementMap.set(listener, pointerupListener);
+      return originalAddEventListener.call(this, 'pointerup', pointerupListener, options);
+    }
+
+    return originalAddEventListener.call(this, type, listener, options);
+  };
+
+  EventTarget.prototype.removeEventListener = function(type, listener, options) {
+    if (type === 'click' && typeof listener === 'function') {
+      var elementMap = listenerMap.get(this);
+      if (elementMap) {
+        var pointerupListener = elementMap.get(listener);
+        if (pointerupListener) {
+          elementMap.delete(listener);
+          return originalRemoveEventListener.call(this, 'pointerup', pointerupListener, options);
+        }
+      }
+    }
+    return originalRemoveEventListener.call(this, type, listener, options);
+  };
+
+  // ── Synthetic click for .onclick compatibility ──
+  // Only dispatch when the gesture is a tap (not a swipe).
+  var SEKAI_SYNTHETIC_KEY = '__sekai_sc';
+
+  originalAddEventListener.call(document, 'pointerup', function(e) {
+    if (e.button !== 0) return;
+    if (!isTap(e)) return;
+    var t = e.target;
+    if (!t || !t.dispatchEvent) return;
+
+    var evt = new MouseEvent('click', {
+      bubbles: true, cancelable: true, view: e.view,
+      detail: 1,
+      screenX: e.screenX, screenY: e.screenY,
+      clientX: e.clientX, clientY: e.clientY,
+      ctrlKey: e.ctrlKey, altKey: e.altKey,
+      shiftKey: e.shiftKey, metaKey: e.metaKey,
+      button: 0, relatedTarget: null
+    });
+    Object.defineProperty(evt, SEKAI_SYNTHETIC_KEY, { value: true });
+    t.dispatchEvent(evt);
+  }, false);
+
+  // Block browser-synthesized click events to prevent double-triggering.
+  originalAddEventListener.call(document, 'click', function(e) {
+    if (!e[SEKAI_SYNTHETIC_KEY]) {
+      e.stopImmediatePropagation();
+    }
+  }, true);
+})();
+</script>
+
+<script>
+(function() {
+  // Track recent touch to block emulated mouse events
+  var lastTouchTime = 0;
+  var TOUCH_MOUSE_DELAY = 200; // ms to block mouse events after touch
+
+  // Global touch tracker - set flag when touch occurs
+  document.addEventListener('touchstart', function() {
+    lastTouchTime = Date.now();
+  }, { passive: true, capture: true });
+
+  document.addEventListener('touchend', function() {
+    lastTouchTime = Date.now();
+  }, { passive: true, capture: true });
+
+  // Block emulated mouse events that follow touch
+  // BUT allow them on focusable elements (inputs need mousedown for focus)
+  function blockEmulatedMouseHandler(e) {
+    if (Date.now() - lastTouchTime < TOUCH_MOUSE_DELAY) {
+      // Don't block on focusable elements - they need mousedown for focus
+      var target = e.target;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return; // Allow the event
+      }
+      e.stopPropagation();
+      // NOTE: Do NOT call preventDefault() here.
+      // CSS user-select:none already handles text selection prevention.
+      // On iOS WKWebView, mousedown.preventDefault() can intermittently
+      // suppress click event synthesis, breaking .onclick handlers.
+    }
+  }
+
+  // Capture phase blockers for emulated mouse events
+  document.addEventListener('mousedown', blockEmulatedMouseHandler, { capture: true });
+
+  // Patch addEventListener to force passive on touch events
+  var originalAddEventListener = EventTarget.prototype.addEventListener;
+
+  EventTarget.prototype.addEventListener = function(type, listener, options) {
+    // Convert touchstart/touchmove to passive
+    // Mouse event emulation is handled by our global blockers above
+    if (type === 'touchstart' || type === 'touchmove') {
+      var newOptions = Object.assign({}, options || {}, { passive: true });
+      return originalAddEventListener.call(this, type, listener, newOptions);
+    }
+    return originalAddEventListener.call(this, type, listener, options);
+  };
+})();
+</script>
+
+<script>
+(function() {
+  // Track if dom_ready was already sent
+  var domReadySent = false;
+
+  function sendDomReady() {
+    if (domReadySent) return;
+    domReadySent = true;
+    window.parent.postMessage({ type: 'sekai_iframe_dom_ready' }, '*');
+  }
+
+  // Send dom_ready when DOMContentLoaded fires
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', sendDomReady);
+  } else {
+    // DOM already loaded
+    sendDomReady();
+  }
+
+  // Helper to serialize message - handles objects that would become [object Object]
+  function serializeMessage(msg) {
+    if (msg === null || msg === undefined) return '';
+    if (typeof msg === 'string') return msg;
+    if (typeof msg === 'object') {
+      try {
+        return JSON.stringify(msg);
+      } catch (e) {
+        return String(msg);
+      }
+    }
+    return String(msg);
+  }
+
+  // Catch JS errors and send to parent
+  window.onerror = function(message, source, lineno, colno, error) {
+    window.parent.postMessage({
+      type: 'sekai_iframe_js_error',
+      message: serializeMessage(message),
+      source: source || '',
+      lineno: lineno || 0,
+      colno: colno || 0,
+      errorName: error ? error.name : '',
+      errorStack: error ? error.stack : ''
+    }, '*');
+    // Return false to allow default error handling
+    return false;
+  };
+
+  // Also catch unhandled promise rejections
+  window.addEventListener('unhandledrejection', function(event) {
+    var reason = event.reason;
+    var isError = reason instanceof Error;
+    window.parent.postMessage({
+      type: 'sekai_iframe_js_error',
+      message: reason ? serializeMessage(reason) : 'Unhandled promise rejection',
+      source: 'unhandledrejection',
+      lineno: 0,
+      colno: 0,
+      errorName: isError ? reason.name : '',
+      errorStack: isError ? reason.stack : ''
+    }, '*');
+  });
+})();
+</script>
+
+<script>
+(function() {
+  // Collect all devicemotion listeners registered by game code
+  var deviceMotionListeners = [];
+
+  // Save original addEventListener
+  var originalAddEventListener = window.addEventListener;
+
+  // Intercept addEventListener to capture devicemotion listeners
+  window.addEventListener = function(type, listener, options) {
+    if (type === 'devicemotion' && typeof listener === 'function') {
+      deviceMotionListeners.push(listener);
+      // Also add to native in case permission is granted elsewhere
+      return originalAddEventListener.call(this, type, listener, options);
+    }
+    return originalAddEventListener.call(this, type, listener, options);
+  };
+
+  // Also intercept removeEventListener
+  var originalRemoveEventListener = window.removeEventListener;
+  window.removeEventListener = function(type, listener, options) {
+    if (type === 'devicemotion' && typeof listener === 'function') {
+      var index = deviceMotionListeners.indexOf(listener);
+      if (index !== -1) {
+        deviceMotionListeners.splice(index, 1);
+      }
+    }
+    return originalRemoveEventListener.call(this, type, listener, options);
+  };
+
+  // Listen for forwarded motion data from parent
+  window.addEventListener('message', function(event) {
+    if (!event.data || event.data.type !== '__sekai_device_motion__') return;
+
+    var data = event.data;
+
+    // Create a synthetic event-like object
+    var syntheticEvent = {
+      accelerationIncludingGravity: data.accelerationIncludingGravity,
+      acceleration: data.acceleration,
+      rotationRate: data.rotationRate,
+      interval: data.interval || 16,
+      // Make it look like a real event
+      type: 'devicemotion',
+      timeStamp: data.timestamp || Date.now(),
+      target: window,
+      currentTarget: window,
+      preventDefault: function() {},
+      stopPropagation: function() {},
+      stopImmediatePropagation: function() {}
+    };
+
+    // Trigger all registered listeners
+    deviceMotionListeners.forEach(function(listener) {
+      try {
+        listener(syntheticEvent);
+      } catch (e) {
+        // Ignore listener errors
+      }
+    });
+  });
+})();
+</script>
+
+<script>
+(function() {
+  // Track all AudioContexts created in this iframe
+  var audioContexts = [];
+  var originalAudioContext = window.AudioContext || window.webkitAudioContext;
+
+  if (originalAudioContext) {
+    // Patch AudioContext constructor to track instances
+    var PatchedAudioContext = function() {
+      var ctx = new originalAudioContext();
+      audioContexts.push(ctx);
+      return ctx;
+    };
+    PatchedAudioContext.prototype = originalAudioContext.prototype;
+    window.AudioContext = PatchedAudioContext;
+    if (window.webkitAudioContext) {
+      window.webkitAudioContext = PatchedAudioContext;
+    }
+  }
+
+  // Track all Audio objects (including those created via new Audio())
+  var audioElements = [];
+  var originalAudio = window.Audio;
+  
+  if (originalAudio) {
+    window.Audio = function(src) {
+      var audio = new originalAudio(src);
+      audioElements.push(audio);
+      return audio;
+    };
+    // Preserve prototype chain
+    window.Audio.prototype = originalAudio.prototype;
+  }
+
+  // Track video elements created via createElement
+  var videoElements = [];
+  var originalCreateElement = document.createElement;
+
+  document.createElement = function(tagName) {
+    var element = originalCreateElement.call(document, tagName);
+
+    // Track audio and video elements
+    if (typeof tagName === 'string') {
+      var tag = tagName.toLowerCase();
+      if (tag === 'audio') {
+        audioElements.push(element);
+      } else if (tag === 'video') {
+        videoElements.push(element);
+      }
+    }
+
+    return element;
+  };
+
+  // Track elements that are INTENDED to be playing (based on .play()/.pause() calls).
+  // This is more reliable than checking .paused at mute time, because iOS pauses
+  // audio elements when the app goes to background BEFORE our JS visibility handler
+  // runs — by the time muteAllAudio() is called, all elements are already paused
+  // by the OS and .paused === true for all of them.
+  var intendedPlaying = new Set();
+
+  if (window.HTMLMediaElement) {
+    var originalHTMLPlay = HTMLMediaElement.prototype.play;
+    var originalHTMLPause = HTMLMediaElement.prototype.pause;
+
+    HTMLMediaElement.prototype.play = function() {
+      intendedPlaying.add(this);
+      return originalHTMLPlay.apply(this, arguments);
+    };
+
+    HTMLMediaElement.prototype.pause = function() {
+      intendedPlaying.delete(this);
+      return originalHTMLPause.apply(this, arguments);
+    };
+  }
+
+  // Track elements queued for playback resume — retried on each user touchstart
+  // until all elements are playing again. More reliable than { once: true } because
+  // it survives cases where the first touch fires before unmuteAllAudio() processes
+  // the message (postMessage is async; user may touch the moment they switch back).
+  var pendingResume = [];
+
+  // Track muted state to restore correctly
+  var mutedElements = new WeakMap();
+  var isMuted = false;
+
+  function muteAllAudio() {
+    if (isMuted) return;
+    isMuted = true;
+    pendingResume = []; // Clear queued resumes — new mute cycle resets state
+
+    // Suspend all AudioContexts
+    audioContexts.forEach(function(ctx) {
+      if (ctx && ctx.state === 'running') {
+        ctx.suspend().catch(function() {});
+      }
+    });
+
+    // Mute all audio and video elements in DOM
+    var mediaElements = document.querySelectorAll('audio, video');
+    mediaElements.forEach(function(el) {
+      // Remember original muted state
+      mutedElements.set(el, el.muted);
+      el.muted = true;
+    });
+
+    // Mute all tracked Audio objects (created via new Audio() or createElement)
+    audioElements.forEach(function(audio) {
+      try {
+        if (!mutedElements.has(audio)) {
+          mutedElements.set(audio, audio.muted);
+        }
+        audio.muted = true;
+      } catch (e) {
+        // Audio might be garbage collected or invalid
+      }
+    });
+
+    // Mute all tracked Video objects (created via createElement)
+    videoElements.forEach(function(video) {
+      try {
+        if (!mutedElements.has(video)) {
+          mutedElements.set(video, video.muted);
+        }
+        video.muted = true;
+      } catch (e) {
+        // Video might be garbage collected or invalid
+      }
+    });
+  }
+
+  function resumeAllContexts() {
+    audioContexts.forEach(function(ctx) {
+      // Call resume() on any non-closed context, including 'running'.
+      // Reason: muteAllAudio() calls ctx.suspend(), which is async. If
+      // unmuteAllAudio() (or a touchstart retry) runs before suspend() resolves,
+      // ctx.state is still 'running' — the old suspended/interrupted-only guard
+      // would skip it, then suspend() resolves and the context stays permanently
+      // suspended. By calling resume() on 'running' contexts too, we queue a
+      // resume after the pending suspend, so both operations execute in order
+      // (suspend → resume) and the context ends up running as intended.
+      // resume() on an already-running context is a no-op per the Web Audio spec.
+      if (ctx && ctx.state !== 'closed') {
+        ctx.resume().catch(function() {});
+      }
+    });
+  }
+
+  function unmuteAllAudio() {
+    if (!isMuted) return;
+    isMuted = false;
+
+    // Resume all AudioContexts immediately (handles 'suspended' and 'interrupted')
+    resumeAllContexts();
+
+    // Restore audio and video elements in DOM to original state
+    var mediaElements = document.querySelectorAll('audio, video');
+    mediaElements.forEach(function(el) {
+      var wasMuted = mutedElements.get(el);
+      if (wasMuted !== undefined) {
+        el.muted = wasMuted;
+      } else {
+        el.muted = false;
+      }
+    });
+
+    // Restore tracked Audio objects to original state
+    audioElements.forEach(function(audio) {
+      try {
+        var wasMuted = mutedElements.get(audio);
+        if (wasMuted !== undefined) {
+          audio.muted = wasMuted;
+        } else {
+          audio.muted = false;
+        }
+      } catch (e) {
+        // Audio might be garbage collected or invalid
+      }
+    });
+
+    // Restore tracked Video objects to original state
+    videoElements.forEach(function(video) {
+      try {
+        var wasMuted = mutedElements.get(video);
+        if (wasMuted !== undefined) {
+          video.muted = wasMuted;
+        } else {
+          video.muted = false;
+        }
+      } catch (e) {
+        // Video might be garbage collected or invalid
+      }
+    });
+
+    // Queue intended elements for playback resume.
+    // iOS pauses audio/video elements on app-switch before our JS handler runs,
+    // so simply unmuting is not enough — we must call .play() to restore.
+    // We populate pendingResume here; the persistent touchstart listener below
+    // retries on every user touch until all elements are playing again.
+    intendedPlaying.forEach(function(el) { pendingResume.push(el); });
+    // Also attempt immediately — succeeds on iOS versions / audio session states
+    // that allow .play() without a fresh user gesture.
+    pendingResume.forEach(function(el) {
+      try { if (el.paused) el.play().catch(function() {}); } catch(e) {}
+    });
+  }
+
+  // Persistent touchstart listener — fires on every user touch while unmuted.
+  // Retries AudioContext resume and HTML5 element .play() until all succeed.
+  // Registered once at script init using capture phase so game code stopPropagation
+  // cannot prevent it from running.
+  //
+  // Why persistent instead of { once: true }:
+  // - postMessage delivery is async; the user may touch before unmuteAllAudio()
+  //   processes the receive_audio_unmute message, consuming a { once: true } slot
+  // - iOS may reject .play() on the first attempt but allow it on subsequent ones
+  document.addEventListener('touchstart', function() {
+    if (isMuted) return;
+    // Retry AudioContexts on every touch (handles 'interrupted' / 'suspended')
+    resumeAllContexts();
+    // Retry HTML5 elements still waiting to resume
+    if (pendingResume.length === 0) return;
+    var toTry = pendingResume;
+    pendingResume = [];
+    toTry.forEach(function(el) {
+      try {
+        if (!el.paused) return; // Already playing — no action needed
+        el.play().catch(function() {
+          pendingResume.push(el); // Failed — retry on next touch
+        });
+      } catch(e) {
+        pendingResume.push(el);
+      }
+    });
+  }, { passive: true, capture: true });
+
+  wind
