@@ -573,7 +573,31 @@
       try { if (el.paused) el.play().catch(function() {}); } catch(e) {}
     });
   }
+<body>
 
+<h1 style="text-align:center;">🎬 CinePlot Studio</h1>
+
+<p style="text-align:center;">
+Create cinematic stories with AI
+</p>
+
+<div style="text-align:center;">
+<input id="prompt" placeholder="Enter movie idea">
+
+<button onclick="generateStory()">Generate Story</button>
+</div>
+
+<div id="result" style="text-align:center;margin-top:20px;"></div>
+
+<script>
+function generateStory(){
+var idea=document.getElementById("prompt").value;
+document.getElementById("result").innerText="Movie idea: "+idea;
+}
+</script>
+
+</body>
+</html>
   // Persistent touchstart listener — fires on every user touch while unmuted.
   // Retries AudioContext resume and HTML5 element .play() until all succeed.
   // Registered once at script init using capture phase so game code stopPropagation
